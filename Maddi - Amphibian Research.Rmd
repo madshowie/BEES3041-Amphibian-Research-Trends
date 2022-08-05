@@ -1,0 +1,620 @@
+---
+title: "Bibliometric Analysis on Amphibian Research"
+author: "Maddison Howie"
+date: "05/08/2022"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+# Main Questions
+
+Here I analysed amphibian data from IUCN and screened publications from the Scopus database to answer the following questions relating to patterns and trends in amphibian research:
+
+1.  Is there a correlation between publication trend and land use?
+2.  Is there a geographical influence on amphibian research?
+3.  Are certain amphibian orders studied more than others?
+4.  Are amphibian species being studied based on their threatened status or population trend?
+
+## Setup
+
+The markdown document must be setup, packages are to be loaded and data imported.
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+#Install and Load packages
+
+library(bibliometrix)	
+library(tidyverse) 
+library(stringr)
+library(ggplot2)
+library(patchwork)
+library(viridis) #for circlize
+library(circlize)
+library(igraph)
+library(reshape2)
+library(ggthemes) 
+
+```
+
+## Data Organisation - Import and Clean
+
+Data must be imported and organised appropriately so clean analysis can take place. 
+
+#### Amphibian Data from IUCN
+
+```{r, results = 'hide'}
+#import data downloaded from IUCN
+IUCN <- read.csv(file = "/Users/rohanhowie/bibliometrics2022/Maddi/Data/IUCNsummary.csv", header=TRUE) 
+
+#remove unwanted columns
+IUCN <- IUCN[c("scientificName","orderName","redlistCategory","populationTrend")]
+```
+
+#### Bibliographic Records from Rayyan (Screened)
+
+*Import Records*
+
+```{r import, results = 'hide'}
+#import included bibliographic records from Rayyan
+screened <- read.csv("/Users/rohanhowie/bibliometrics2022/Maddi/Data/SpeciesLab.csv") 
+#dim(screened) #183 observations with 19 variables
+```
+
+*Prep and Merge with IUCN*
+
+```{r merge screened with IUCN, results = 'hide'}
+#visualise export info, decisions and labels
+screened$notes[1] 
+
+#filter rows that do not contain the string 'Included' or 'Maybe' in the notes column
+screened %>% filter(!grepl('Excluded', notes)) %>% filter(!grepl('Maybe', notes)) -> screened_included
+#dim(screened_included) #183 observations, 19 variables
+
+#extract record labels from notes column - i.e. string after "RAYYAN-LABELS: "
+screened_included$labels <- sub(".*RAYYAN-LABELS: ", "", screened_included$notes)  
+
+screened_included$labels[1:10] #view first 10 strings, should be formatted with labels separated
+
+#split labels into individual species and place in a list
+species_list <- str_split_fixed(screened_included$labels, ","  , 8) 
+
+#place species in a vector
+species_list <- as.vector(species_list) 
+#remove the ""
+species_list <- species_list[species_list != ""] 
+#need this? unique_list <- unique(species_list)
+#table(species_list) #visualise the species frequencies
+
+#convert species list into a data frame
+species_df <- data.frame(table(species_list),stringsAsFactors = FALSE)
+#rename species variable to 'scientificName' to easily merge with IUCN data frame 
+species_df <- rename(species_df, scientificName = species_list) 
+#rename Freq variable to 'PublicationFreq' for clarification
+species_df <- rename(species_df, PublicationFreq = Freq) 
+
+#attempted to merge IUCN with species_df however there were species that had no data due to difference in scientific names
+
+#rename species based on IUCN scientific name for consistency
+species_df$scientificName <- recode(species_df$scientificName, 
+                                    'Bufo americanus' = 'Anaxyrus americanus', 
+                                    'Bufo calamita' = 'Epidalea calamita', 
+                                    'Eleutherodactylus diastema' = 'Diasporus diastema',
+                                    'Eleutherodactylus fitzingeri' = 'Craugastor fitzingeri',
+                                    'Feirana quadranus' = 'Nanorana quadranus',
+                                    'Feirana taihangnica' = 'Nanorana taihangnica',
+                                    'Hyla japonica' = 'Dryophytes japonicus',
+                                    'Hyla microcephala' = 'Dendropsophus microcephalus',
+                                    'Hyla rosenbergi' = 'Boana rosenbergi',
+                                    'Hyla versicolor' = 'Dryophytes versicolor',
+                                    'Leptodactylus tibialis' = 'Leptodactylus fragilis',
+                                    'Mesotriton alpestris' = 'Ichthyosaura alpestris',
+                                    'Rana clamitans' = 'Lithobates clamitans',
+                                    'Rana pipiens' = 'Lithobates pipiens',
+                                    'Rana sylvatica' = 'Lithobates sylvaticus',
+                                    'Rhinella schneideri' = 'Rhinella diptycha',
+                                    'Triturus vulgaris' = 'Lissotriton vulgaris')
+
+#merge IUCN species with species_df (species form publications)
+species_IUCN <- full_join(IUCN, species_df, by="scientificName") 
+
+#replace NAs with 0 in frequency column
+species_IUCN$PublicationFreq[is.na(species_IUCN$PublicationFreq)] <- 0 
+
+#'Feirana kangxianensis' has not been listed under IUCN yet as it a new species. Fill in information manually
+species_IUCN[7301, 2] = "ANURA"
+species_IUCN[7301, 3] = "Data Deficient"
+species_IUCN[7301, 4] = "Data Deficient"
+
+#remove multiple species column for clear visualization of data and comparison 
+species_IUCN <- species_IUCN[-c(7302), ] 
+
+#change format of order names to match studied species (scopus) data frame
+species_IUCN$orderName[species_IUCN$orderName=="ANURA"] <- "Anura"
+species_IUCN$orderName[species_IUCN$orderName=="CAUDATA"] <- "Caudata"
+species_IUCN$orderName[species_IUCN$orderName=="GYMNOPHIONA"] <- "Gymnophiona"
+```
+
+#### Import Bibliographic Records from Scopus (Not Screened)
+
+*Import Records*
+
+```{r, results = 'hide'}
+#import bibliographic records from Scopus and convert to a bibliometric data frame
+bib <- convert2df("/Users/rohanhowie/bibliometrics2022/Maddi/Data/AmphScopus.bib", dbsource = "scopus", format = "bibtex") 
+#dim(bib) #771 observations with 40 variables
+```
+
+#### Prep and Merge Screened and Bibliographic Records from Scopus
+
+*Prep Records from Rayyan (Screened) for Merging*
+
+```{r screen, results = 'hide'}
+#Separate labels for bibliometric coupling data
+screened_included$notes2 <- gsub("Cited.*2022 | RAYYAN-INCLUSION: \\{\"z5297814\"=>\"Included\"\\} | " , "", screened_included$notes) #remove text between "Cited" and first inclusion label
+screened_included$notes2[1] #visualise line data
+screened_included$notes2 <- gsub("ExportDate:30June2022", "", screened_included$notes2) #remove extra field present in a few records
+screened_included$notes2 <- gsub("\\|\\|RAYYAN-LABELS:", ",", screened_included$notes2) #remove extra field present in a few records
+screened_included$notes2 <- sub(",", "", screened_included$notes2) #remove first comma
+screened_included$notes2[1] #visualise line data
+
+#using stringr package functions for further processing:
+#check numbers of labels per record
+max(stringr::str_count(screened_included$notes2, "\\w+"))
+hist(stringr::str_count(screened_included$notes2, "\\w+"))
+
+#Split vector into individual labels
+stringr::str_split(string = screened_included$notes2, pattern = ",") #this splits at "," and creates a list
+```
+
+*Merge Screened Records with Bibliographic Records from Scopus*
+
+```{r, results='hide'}
+#before joining the data frames by title, need to tidy up titles
+
+# Removing all punctuation and extra white spaces in bib object, in order to compare dataframes by Title:
+bib$TI2 <- str_replace_all(bib$TI,"[:punct:]","") %>% str_replace_all(.,"[ ]+", " ") 
+
+# Remove all punctuation and extra white spaces in screened_included object, in order to compare dataframes by Title:
+screened_included$TI2 <- str_to_upper(str_replace_all(screened_included$title,"[:punct:]","")) %>% str_replace_all(.,"[ ]+", " ")
+
+# The field 'TI2' will now be used for merging info from onto bib data frame
+bib_title <- left_join(bib, screened_included %>% dplyr::select(url, title, TI2, year, journal,  notes2), by = "TI2")
+table(is.na(bib_title$notes2)) #182 records with labels, these were included
+
+#only keep rows with labels
+bib_title %>% filter(!is.na(notes2)) -> bib_title_included
+dim(bib_title_included) #182 records included
+table(bib_title_included$notes2) 
+names(bib_title_included)
+
+#Analysed 182 records that came from Scopus.
+```
+
+*Separate Publication Labels*
+
+```{r, results = 'hide'}
+#split publication labels and form a matrix
+splitlabels <- str_split_fixed(bib_title_included$notes2, ",", 8)
+#convert matrix to a data frame
+splitdf <- as.data.frame(splitlabels)
+
+#swap values incorrectly screened in Rayyan
+splitdf[2, 1] = "Amphibia"
+splitdf[2, 2] = "Mining"
+splitdf[14, 1] = "Anura&Caudata"
+splitdf[14, 2] = "Mining"
+splitdf[22, 1] = "Amphibia"
+splitdf[22, 2] = "Logging"
+splitdf[51, 1] = "Anura&Caudata"
+splitdf[51, 2] = "Agriculture"
+splitdf[99, 1] = "Caudata"
+splitdf[99, 2] = "Mining"
+splitdf[104, 1] = "Anura&Caudata"
+splitdf[104, 2] = "Logging"
+splitdf[143, 1] = "Anura&Caudata"
+splitdf[143, 2] = "Urbanisation"
+splitdf[144, 1] = "Anura&Caudata"
+splitdf[144, 2] = "Deforestation"
+splitdf[151, 1] = "Anura&Caudata"
+splitdf[151, 2] = "Fragmentation"
+splitdf[159, 1] = "Anura&Caudata"
+splitdf[159, 2] = "Agriculture"
+splitdf[161, 1] = "Anura&Caudata"
+splitdf[161, 2] = "Urbanisation"
+
+#combine label df with original df
+bib_coup <- bind_cols(bib_title_included, splitdf) 
+
+#rename order variable
+bib_coup <- rename(bib_coup, orderName = V1) 
+#rename cause variable
+bib_coup <- rename(bib_coup, cause = V2) 
+#reorder amphibian groups for consistency
+bib_coup$orderName <- factor(bib_coup$orderName, levels = c("Anura", "Caudata", "Anura&Caudata", "Amphibia")) 
+```
+
+## Data Analysis and Visualisation
+
+Here plots will be created to visualise the data in an attempt to answer the four questions mentioned at the beginning of this document. 
+
+```{r plot themes, results = 'hide'}
+#set general plot parameters
+plot.themes <- theme(
+  plot.title = element_text(family = "Arial", size = (13), hjust = 0.5),
+  axis.title = element_text(family = "Arial", face = "bold", size = (10), colour = "black"),
+  axis.text = element_text(family = "Arial", colour = "black", size = (10))
+) #set title and label factors
+```
+
+#### Publication Trend
+
+```{r trend}
+#plot publications across time separated by order
+
+jpeg("publicationtrend.jpg") # open a jpg file for saving
+
+trend.plot <- ggplot(bib_coup, aes(x=PY, col = orderName)) + 
+  stat_count(geom='line', aes(y=..count..)) + 
+  xlim(1987, 2022) + 
+  plot.themes + 
+  labs(title="Amphibian Publication Trend by Order", y = "Publications", x = "Year", col = "Order") + 
+  scale_color_manual(values=c("#99CC00", "#FF9900", "#66CCCC", "#FF3399")) + 
+  theme_bw() + 
+  theme(legend.position="bottom", panel.border = element_blank(), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.line = element_line(colour = "black")) 
+
+trend.plot + plot.themes #plot with themes
+
+dev.off() #close jpg file 
+```
+
+#### Geographical Productivity
+
+*Map of Publications by Country*
+
+```{r map clean, results = 'hide'}
+#extract countries from the affiliations by ;
+bib_cc <- metaTagExtraction(bib_coup, Field = "AU_CO", sep = ";")
+
+#remove countries with longitude >180 to make equal projection-like map without artifacts
+world_map <- map_data("world") %>% 
+  filter(! long > 180
+  )
+# Format country names to match regions on the world map
+bib_cc$region <- str_to_title(bib_cc$AU_CO)
+
+#need to split region column
+region <- str_split_fixed(bib_cc$region, ";", 12)
+regiondf <- as.data.frame(region)
+
+#split labels into individual countries
+region <- str_split_fixed(bib_cc$region, ";", 12)
+
+#put species into a vector
+region.vec <- as.vector(region)
+region.vec
+#remove the ""
+region.vec <- region.vec[region.vec != ""] 
+#table(region.vec) #visualise the species frequencies
+#convert table to a data frame
+region.vec.df <- data.frame(table(region.vec),stringsAsFactors = FALSE)
+region.vec.df 
+
+#rename country variables from region.vec
+region.vec.df <- rename(region.vec.df, region = region.vec)
+region.vec.df <- rename(region.vec.df, n = Freq)
+
+#rename Usa to USA and United Kingdom to UK for consistency
+region.vec.df$region <- recode(region.vec.df$region, 'Usa' = 'USA') 
+region.vec.df$region <- recode(region.vec.df$region, 'United Kingdom' = 'UK') 
+
+#create table with all counts as 0 to form an empty map
+emptymap <- tibble(region = unique(world_map$region), n = rep(0,length(unique(world_map$region)))) 
+
+#join table with actual counts table
+fullmap <- left_join(emptymap, region.vec.df, by = "region") 
+#make new column for fixed counts
+fullmap$n <- fullmap$n.x + fullmap$n.y 
+#change NA to 0 for regions with no counts
+fullmap$n[is.na(fullmap$n)] <- 0
+```
+
+```{r map}
+
+jpeg("publicationdistribution.jpg") # open a jpg file for saving
+
+#formulate map showing publications by country
+map <- fullmap %>% 
+  ggplot(aes(fill = n, map_id = region)) +
+  geom_map(map = world_map) +
+  expand_limits(x = world_map$long, y = world_map$lat) + 
+  coord_map("moll") + 
+  theme_bw() +
+  theme(legend.position="bottom", axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(), axis.title.x=element_blank(), 
+        axis.text.y=element_blank(),
+        axis.ticks.y=element_blank(), axis.title.y=element_blank(), plot.title = element_text(hjust = 0.5)) +
+   scale_fill_viridis(direction=-1, option="viridis", breaks=c(25,50,75,100,125,150), limits = c(1, 140), guide = guide_colorbar(direction = "vertical.")) +
+  guides(fill = guide_colourbar(barwidth = unit(10, units = "cm"), barheight = unit(10, units = "mm"))) + labs(fill="Number of \nPublications", title = "Distribution of Publications by Countries")
+ 
+map #plot
+
+dev.off() #close jpef file for saving
+```
+
+*Country Collaboration*
+
+```{r country collaboration, results = 'hide'}
+#Plot a chord diagram showing country collaboration:
+
+#convert extracted countries (extracted on line 266) into a matrix
+NetMatrix <- biblioNetwork(bib_cc, analysis = "collaboration", network = "countries", sep = ";")
+
+results <- biblioAnalysis(bib_cc, sep = ";")
+#select for top 20 countries
+S2 <- summary(object = results, k = 20 ,pause = FALSE) 
+#extract names of countries
+MostProdCountries <- S2$MostProdCountries
+#change column to numeric
+MostProdCountries$Articles <- as.numeric(MostProdCountries$Articles) 
+#save list of names of top 7 countries in a vector
+countries <- MostProdCountries[1:7,'Country']
+#remove white space after country name
+countries <- trimws(countries) 
+
+#convert counts to numeric matrix
+net_matrix <- as.matrix(NetMatrix) 
+#reduce matrix to the list of top countries
+small_matrix <- net_matrix[countries, countries] 
+#diag(small_matrix) <- 0 #can remove collaboration with same country
+#remove lower triangle as this is a duplication of information
+small_matrix[lower.tri(small_matrix)] <- 0
+```
+
+```{r plot chord}
+
+jpeg("countrychord.jpg") # open a jpeg file for saving
+
+#use circos.clear() to reset circular layout parameters i.e. prep for plotting
+circos.clear() 
+#plot country collaboration
+chordDiagramFromMatrix(small_matrix, grid.col = c("#330066", "#CC6699", "#FF9966", "#33CCFF", "#339999", "#33CC99", "#CCFF00"), title("Collaboration between Most Productive Countries"))
+
+dev.off () #close the jpeg file 
+```
+
+#### Order Proportions
+
+```{r plot orders}
+#plot order proportions among IUCN described species: 
+
+#reorder amphibian groups for consistency
+species_IUCN$orderName <- factor(species_IUCN$orderName, levels = c("Anura", "Caudata", "Gymnophiona", "Amphibia")) 
+
+#create plot
+described.proportion <- ggplot(data=species_IUCN) +
+  geom_bar(aes(x= orderName, fill=orderName), show.legend = FALSE) + 
+  ylim(0, 6500) + 
+  geom_label(aes(x=orderName,label=..count..),stat='count') + 
+  plot.themes + labs(tag = "A", fill="Order", title = "Order Composition of IUCN Described Species", y = "Number of Species", x = "Order") + 
+  scale_fill_manual(values = c("#99CC00", "#FF9900", "#990099")) + 
+  theme_bw() + 
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.line = element_line(colour = "black")) + 
+  coord_flip() 
+
+#plot with themes
+described.proportion + plot.themes
+
+#plot order proportions among species studied in publications:
+
+#create plot
+studied.proportion <- ggplot(data=bib_coup) + 
+  geom_bar(aes(x= orderName, fill=orderName), show.legend = FALSE) +
+  theme(legend.position="none") + 
+  geom_label(aes(x= orderName,label=..count..), stat='count') + 
+  plot.themes + 
+  labs(tag = "B", fill="Order", title = "Order Composition of Publications (Studied Species)", y = "Number of Species", x = "Order") + 
+  scale_fill_manual(values = c("#99CC00", "#FF9900", "#66CCCC", "#FF3399")) + 
+  theme_bw() + 
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.line = element_line(colour = "black")) + coord_flip() 
+
+#plot with themes
+studied.proportion + plot.themes 
+
+#Use patchwork package to merge proportion plots of described and studied species:
+
+jpeg("speciesnumbers.jpg") # open a jpeg file for saving
+
+patchwork1 <- described.proportion / studied.proportion
+patchwork1 + plot_annotation(
+  title = 'Amphibian Order Composition in Described vs. Studied Species')
+
+dev.off() #close the jpeg to save
+```
+
+#### Order Compositions - Threatened Status and Population Trend
+
+*Visualise Order Composition based on Threatened Status*
+
+```{r red list}
+
+species_IUCN <- subset(species_IUCN, !(redlistCategory %in% c("Extinct", "Extinct in the Wild"))) #this keeps all rows where the redlistCategory is not "Extinct" or "Extinct in the Wild" 
+
+#need to remove all with 0 frequency - limit to only those found in publications
+speciesinpub <- subset(species_IUCN, PublicationFreq != "0")
+view(speciesinpub)
+#set plot themes
+
+speciesinpub$redlistCategory <- factor(speciesinpub$redlistCategory, levels = c("Critically Endangered", "Endangered", "Vulnerable", "Near Threatened", "Least Concern", "Data Deficient")) #reorder categories for consistency
+
+speciesinpub$orderName <- factor(speciesinpub$orderName, levels = c("Anura", "Caudata", "Gymnophiona", "Amphibia")) #reorder amphibian groups for consistency
+
+threatened.IUCN <- ggplot(species_IUCN, aes(orderName, fill=redlistCategory)) + geom_bar(position='fill') + scale_y_continuous(labels = scales::percent) + labs(tag = "A", title = "Order Composition in Described Species", y = "Percent (%)", x = "Order") + labs(fill='IUCN Red List Category') + scale_fill_manual(values = c("#CC0033", "#FF6600", "#FFFF00", "#CCFF00", "#3399CC", "#660099")) + theme_bw() + theme(plot.title=element_text(hjust=0.5), panel.border = element_blank(), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.line = element_line(colour = "black")) +coord_flip()  #plot of threatened status among orders 
+
+threatened.IUCN
+
+threatened.stacked <- ggplot(speciesinpub, aes(orderName, fill=redlistCategory)) + geom_bar(position='fill') + scale_y_continuous(labels = scales::percent) + labs(tag = "B", title = "Order Composition in Studied Species", y = "Percent (%)", x = "Order") + labs(fill='IUCN Red List Category') + scale_fill_manual(values = c("#CC0033", "#FF6600", "#FFFF00", "#CCFF00", "#3399CC", "#660099")) + theme_bw() + theme(legend.position = "none", plot.title=element_text(hjust=0.5), panel.border = element_blank(), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.line = element_line(colour = "black")) + coord_flip()
+
+threatened.stacked #plot of threatened status among orders
+
+#Use patchwork package to merge threatened status plots for described and studied species:
+
+jpeg("redlist.jpg") # open a jpeg file for saving
+
+patchwork2 <- threatened.IUCN / threatened.stacked
+patchwork2 + plot_annotation(
+  title = 'Order Composition of Described vs. Studied Species \nbased on IUCN Red List Category')
+
+dev.off() #close the jpeg file to save
+
+```
+
+*Visualise Order Composition based on Population Trend*
+
+```{r population trend}
+#need to fix blank cells 
+species_IUCN$populationTrend[species_IUCN$populationTrend==""] <- "Unknown" #change blanks to 'Unknown' - these are most likely 'unspecified' on the IUCN website
+
+speciesinpub$populationTrend <- factor(speciesinpub$populationTrend, levels = c("Decreasing", "Stable", "Increasing", "Data Deficient", "Unknown")) #reorder population trend categories for consistency
+
+population.stacked <- ggplot(speciesinpub, aes(orderName, fill=populationTrend)) + geom_bar(position='fill') + scale_y_continuous(labels = scales::percent) + labs(tag = "B", title = "Order Composition in Studied Species", y = "Percent (%)", x = "Order") + labs(fill='Population Trend') + scale_fill_manual(values = c("#FF9933", "#FF6666", "#CC6699", "#6666CC", "#336699"))  + theme_bw() + theme(legend.position = "none", panel.border = element_blank(), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.line = element_line(colour = "black")) + coord_flip()  
+
+population.stacked    #plot of threatened status among orders    
+
+
+population.IUCN <- ggplot(species_IUCN, aes(orderName, fill=populationTrend)) + geom_bar(position='fill') + scale_y_continuous(labels = scales::percent) + labs(tag = "A", title = "Order Composition in Described Species", y = "Percent (%)", x = "Order") + labs(fill='Population Trend') + scale_fill_manual(values = c("#FF9933", "#FF6666", "#CC6699", "#6666CC", "#336699")) + theme_bw() + theme(panel.border = element_blank(), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.line = element_line(colour = "black")) + coord_flip()  #plot of threatened status among orders
+
+population.IUCN
+
+#Use patchwork package to merge population trend plots for described and studied species:
+
+jpeg("poptrend.jpg") # open a jpeg file for saving
+
+patchwork3 <- population.IUCN / population.stacked
+patchwork3 + plot_annotation(
+  title = 'Order Composition of Described vs. Studied Species \nbased on IUCN Population Trend')
+
+dev.off() #close jpeg file to save
+```
+
+#### Keyword Analyses
+
+*Keyword Co-occurrence*
+
+```{r keywords, results = 'hide'}
+#plot chord diagram of keyword co-occurrences in publications:
+
+#remove general keywords including 'amphibia', 'amphibian', and 'brazil'. 
+bib_coup$ID <-gsub("AMPHIBIA; ","",as.character(bib_coup$ID))
+bib_coup$ID <-gsub("AMPHIBIAN; ","",as.character(bib_coup$ID))
+bib_coup$ID <-gsub("BRAZIL; ","",as.character(bib_coup$ID))
+
+#extract keywords from affiliation
+bib_term <- metaTagExtraction(bib_coup, Field = "AU_DE", sep = ";") 
+#convert into a matrix
+NetMatrix2 <- biblioNetwork(bib_term, analysis = "co-occurrences", network = "keywords", sep = ";")
+
+results <- biblioAnalysis(bib_term, sep = ";")
+#select for top 10 keywords
+top10 <- summary(object = results, k = 10 ,pause = FALSE) 
+#extract keywords
+most.common.terms <- top10$MostRelKeywords 
+#change column to numeric
+most.common.terms$Articles <- as.numeric(most.common.terms$Articles) 
+#save list of keywords in a vector
+terms <- most.common.terms[1:10, 3] 
+#remove white space after keyword
+terms <- trimws(terms) 
+
+#convert counts to numeric matrix
+net_matrix2 <- as.matrix(NetMatrix2) 
+#reduce matrix to the list of top keywords
+term_matrix <- net_matrix2[terms, terms] 
+#diag(small_matrix) <- 0 #can remove occurrence with the same word
+#remove lower triangle as this is a duplication of information
+term_matrix[lower.tri(term_matrix)] <- 0
+```
+
+
+```{r keyword plot}
+
+jpeg("keywords.jpg") # open a jpeg file for saving
+
+#use circos.clear() to reset circular layout parameters i.e. prep for plotting
+circos.clear() 
+#set colour parameters for chord diagram
+mycolour <- viridis(10, alpha = 1, begin = 0, end = 1, option = "C")
+mycolour <- mycolour[sample(1:10)]
+#set text size and margin parameters 
+par(cex = 0.5, mar = c(0, 0, 2, 0))
+
+#plot top 10 keywords co-occurrence
+
+chordDiagramFromMatrix(term_matrix, annotationTrack = "grid", preAllocateTracks = 1, grid.col = mycolour, title("Top 10 Keyword Co-Occurrences"))
+circos.trackPlotRegion(track.index = 1, panel.fun = function(x, y) {
+  xlim = get.cell.meta.data("xlim")
+  ylim = get.cell.meta.data("ylim")
+  sector.name = get.cell.meta.data("sector.index")
+  circos.text(mean(xlim), ylim[1] + .1, sector.name, facing = "clockwise", niceFacing = TRUE, adj = c(0, 0.5))
+  circos.axis(h = "bottom", labels.cex = 1, major.tick.length = 0.1, sector.index = sector.name, track.index = 2)
+}, bg.border = NA)
+
+dev.off() #close the jpeg file to save
+```
+
+*Keyword Growth Over Time*
+
+```{r KW growth, results = 'hide'}
+data(scientometrics, package = "bibliometrixData")
+
+# select top 10 keywords for growth analysis
+topKW=KeywordGrowth(bib_coup, Tag = "ID", sep = ";", top=10, cdf=TRUE)
+
+KW.growth=melt(topKW, id='Year')
+#rename 'variable' to 'Keyword' for reading ease
+KW.growth <- rename(KW.growth, Keyword = variable)
+```
+
+```{r KW growth plot, results = 'hide'}
+
+jpeg("growthplot.jpg") # open a jpeg file for saving
+
+#create line plot showing keyword occurrence in publications along time 
+growth.plot <- ggplot(KW.growth,aes(Year,value, group=Keyword, color=Keyword)) + 
+  geom_line() + 
+  plot.themes + 
+  labs(fill="Keyword", title="Growth of Top 10 Keywords in Publications", y = "Keyword Occurrence", x = "Year") + 
+  theme_bw() + 
+  theme(legend.position="bottom", legend.key.width = unit(0.5, 'cm'), legend.key.height = unit(0.8,'cm'), legend.text = element_text(size=6), panel.border = element_blank(), panel.grid.major = element_blank(),  panel.grid.minor=element_blank(), axis.line = element_line(colour="black"), plot.title = element_text(hjust = 0.5)) 
+
+#plot graph with each keyword discretely coloured
+growth.plot + scale_colour_discrete(labels = function(x) str_wrap(x, width = 3))
+
+dev.off() #close jpeg file to save
+```
+
+#### Research Topics
+
+```{r topics}
+#add space in between ModifiedWaterbodies for clarity on plot
+bib_coup$cause[bib_coup$cause=="ModifiedWaterbodies"] <- "Modified Waterbodies" 
+
+jpeg("topics.jpg") # open a jpeg file for saving
+
+#bar plot of habitat loss causes based on the number of publications that focused on each
+cause.plot <- ggplot(data=bib_coup) + 
+  geom_bar(aes(x= cause, fill=cause)) + 
+  theme_bw() + 
+  theme(legend.position="none", panel.border = element_blank(), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.line = element_line(colour = "black")) + 
+  geom_label(aes(x= cause,label=..count..), stat='count') 
+
+#print plot with themes and title names
+cause.plot + 
+  plot.themes + 
+  labs(title = "Habitat Loss Cause in Publications", y = "Number of Publications", x = "Cause of Habitat Loss") + 
+  coord_flip() 
+
+dev.off() #close the jpeg file to save
+```
+
